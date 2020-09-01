@@ -8,7 +8,7 @@ optional arguments:
 
 subcommands:
 
-<command>   Choose one of these modalities:
+<command>   Choose one of these modalities:<br>
 train       Train or finetune a model
 test        Score a model
 crossvalid  Cross-validation (includes multiple iterations of training and
