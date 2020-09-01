@@ -11,6 +11,8 @@ subcommands:
 <command>   Choose one of these modalities:
 
 train       Train or finetune a model
+
 test        Score a model
+
 crossvalid  Cross-validation (includes multiple iterations of training and
               testing)
