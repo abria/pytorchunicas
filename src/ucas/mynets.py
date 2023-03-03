@@ -1,5 +1,9 @@
+import os
+
+import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import torchvision.models as models
+
 import ucas.DoGLayer as DoG
 import ucas.Sinc_conv2D as Sinc
 
@@ -29,9 +33,65 @@ def init_weights(m, verbose=False):
             print(f'...initializing {type(m).__name__} with default initialization method')
 
 
-class VGGNetL4(nn.Module):
+class ResNet18(nn.Module):
     def __init__(self):
-        super(VGGNetL4, self).__init__()
+        super(ResNet18, self).__init__()
+
+        self.resnet = models.resnet18(weights=None)
+        self.resnet.conv1 = nn.Conv2d(1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+        self.resnet.fc = nn.Linear(in_features=512, out_features=2, bias=True)
+
+    def forward(self, x):
+        return self.resnet(x)
+
+
+class ResNet50(nn.Module):
+    def __init__(self):
+        super(ResNet50, self).__init__()
+
+        self.resnet = models.resnet50(weights=None)
+        self.resnet.conv1 = nn.Conv2d(1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+        self.resnet.fc = nn.Linear(in_features=2048, out_features=2, bias=True)
+
+    def forward(self, x):
+        return self.resnet(x)
+
+
+class DoGResNet18(nn.Module):
+    def __init__(self):
+        super(DoGResNet18, self).__init__()
+
+        self.DoG = DoG.DoGLayer(1, 32, 47)
+        self.ln = nn.LayerNorm([32, 48, 48])
+        self.act = nn.ReLU()
+
+        self.resnet = models.resnet18(weights=None)
+        self.resnet.conv1 = nn.Conv2d(32, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+        self.resnet.fc = nn.Linear(in_features=512, out_features=2, bias=True)
+
+    def forward(self, x):
+        return self.resnet(self.act(self.ln(self.DoG(x))))
+
+
+class DoGResNet50(nn.Module):
+    def __init__(self):
+        super(DoGResNet50, self).__init__()
+
+        self.DoG = DoG.DoGLayer(1, 32, 47)
+        self.ln = nn.LayerNorm([32, 48, 48])
+        self.act = nn.ReLU()
+
+        self.resnet = models.resnet50(weights=None)
+        self.resnet.conv1 = nn.Conv2d(32, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+        self.resnet.fc = nn.Linear(in_features=2048, out_features=2, bias=True)
+
+    def forward(self, x):
+        return self.resnet(self.act(self.ln(self.DoG(x))))
+
+
+class MCNet(nn.Module):
+    def __init__(self):
+        super(MCNet, self).__init__()
         self.conv1 = nn.Conv2d(1, 32, 3, 1, 1)
         self.conv2 = nn.Conv2d(32, 32, 3, 1, 1)
         self.conv3 = nn.Conv2d(32, 32, 3, 1, 1)
@@ -70,11 +130,12 @@ class VGGNetL4(nn.Module):
         return x
 
 
-class ControlConvLnL4(VGGNetL4):
+class ConvMCNet(MCNet):
     def __init__(self):
         super().__init__()
         self.conv0 = nn.Conv2d(1, 32, 3, 1, 1)
         self.ln = nn.LayerNorm([32, 48, 48])
+        self.conv1 = nn.Conv2d(32, 32, 3, 1, 1)
         self.apply(init_weights)
 
     def forward(self, x):
@@ -82,7 +143,62 @@ class ControlConvLnL4(VGGNetL4):
         return super().forward(x)
 
 
-class DoGNetL4(ControlConvLnL4):
+class DeepMCNet(MCNet):
+    def __init__(self):
+        super().__init__()
+        self.conv00 = nn.Conv2d(1, 32, 3, 1, 1)
+        self.conv01 = nn.Conv2d(32, 32, 3, 1, 1)
+        self.conv1 = nn.Conv2d(32, 32, 3, 1, 1)
+        self.fc1 = nn.Linear(32, 256)
+        self.apply(init_weights)
+
+    def forward(self, x):
+        x = self.act(self.conv00(x))
+        x = self.act(self.conv01(x))
+        x = self.pool(x)
+        return super().forward(x)
+
+
+class UniformDoGMCNet(ConvMCNet):
+    def __init__(self):
+        super().__init__()
+        lim = 47 / 6
+        b = lim / 31
+        s1 = torch.linspace(b, lim, 32).unsqueeze(1)
+        s2 = torch.linspace(0, lim - b, 32).unsqueeze(1)
+        s2[0][0] = 0.1
+        self.conv0 = DoG.NotLearnableDoGLayer(1, 32, 47, s2, s1)
+
+
+class RandomDoGMCNet(ConvMCNet):
+    def __init__(self):
+        super().__init__()
+        s1 = torch.rand(32, 1) * 47 / 6
+        s2 = torch.rand(32, 1) * 47 / 6
+        self.conv0 = DoG.NotLearnableDoGLayer(1, 32, 47, s1, s2)
+
+
+def get_sigma(path, out_channel=32, in_channel=1):
+    with open(path, "r") as f:
+        a = f.readlines()
+    b = [[float(x[23:27]), float(x[30:34])] for x in a]
+
+    c = torch.tensor(b)[0:32]
+
+    s1 = c[:, 0].unsqueeze(1)
+    s2 = c[:, 1].unsqueeze(1)
+
+    return s1, s2
+
+
+class OptimizedDoGMCNet(ConvMCNet):
+    def __init__(self):
+        super().__init__()
+        s1, s2 = get_sigma(os.path.dirname(os.path.abspath(__file__)) + "/DoG_params.txt")
+        self.conv0 = DoG.NotLearnableDoGLayer(1, 32, 47, s1, s2)
+
+
+class DoGMCNet(ConvMCNet):
     def __init__(self):
         super().__init__()
         self.conv0 = DoG.DoGLayer(1, 32, 47)
@@ -91,7 +207,7 @@ class DoGNetL4(ControlConvLnL4):
         return self.conv0.getFilters()
 
 
-class SincNetL4(ControlConvLnL4):
+class SincMCNet(ConvMCNet):
     def __init__(self):
         super().__init__()
         self.conv0 = Sinc.Sinc_conv2D(1, 32, 47)
